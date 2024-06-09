@@ -2,10 +2,11 @@
 
 xexpect 命令:
 - 支持 linux 和 windows (cmd，powershell，git bash...)
+- 支持交互式和非交互式脚本环境
 - 内嵌 javascript 引擎(完整支持 ECMAScript 5.1)
 - 支持js脚本加密，增加密码安全性
 
-go 库文档：[xexpect 库](./readme_lib.md)
+go 库文档：[xexpect 库]([./readme_lib.md](https://github.com/zh-five/xexpect/blob/main/readme_lib.md))
 
 # 功能速览
 ### 1.命令参数
