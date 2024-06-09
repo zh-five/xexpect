@@ -3,7 +3,6 @@ package xexpect
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"regexp"
 	"strings"
@@ -55,7 +54,7 @@ func NewXExpect() *XExpect {
 
 func (sf *XExpect) SetTimeout(second int) {
 	if sf.step != stepNew {
-		sf.errorf("SetTimeout() must be called before RunCmd()")
+		sf.errorf("SetTimeout() must be called before Run()")
 	}
 
 	if second < 1 {
@@ -65,9 +64,9 @@ func (sf *XExpect) SetTimeout(second int) {
 	sf.timeout = second
 }
 
-func (sf *XExpect) RunCmd(args []string) {
+func (sf *XExpect) Run(args []string) {
 	if sf.step != stepNew {
-		sf.errorf("RunCmd() can be called only once")
+		sf.errorf("Run() can be called only once")
 	}
 	sf.step = stepRun
 
@@ -116,18 +115,20 @@ func (sf *XExpect) RunCmd(args []string) {
 	})
 }
 
-func (sf *XExpect) Expect(rule [][]string) (int, string) {
+func (sf *XExpect) Matchs(rule [][]string) (int, string) {
 	if sf.step < stepRun {
-		sf.errorf("Expect() must be called after RunCmd()")
+		sf.errorf("Matchs() must be called after Run()")
 	}
 	if sf.step > stepExpect {
-		sf.errorf("Expect() must be called befor Exit() and Interact() ")
+		sf.errorf("Matchs() must be called befor Exit() and Interact() ")
 	}
 	sf.step = stepExpect
 
 	listAction := sf.parseRule(rule)
-	var isMatch bool
+
+	isMatch := false
 	matchStr := ""
+	cutLen := 0
 
 	for {
 		n, err := sf.ptmx.Read(sf.buf[sf.start:])
@@ -135,25 +136,35 @@ func (sf *XExpect) Expect(rule [][]string) (int, string) {
 			break
 		}
 		fmt.Print(string(sf.buf[sf.start : sf.start+n])) // 显示pty输出
-		if sf.start+n > sf.matchLen {
+		if n > 0 {
 			text := string(sf.buf[:sf.start+n])
-			copy(sf.buf, sf.buf[sf.start+n-sf.matchLen:])
-			sf.start = sf.matchLen
 
 			for i, act := range listAction {
 				// 匹配
 				isMatch = false
 				matchStr = ""
+				cutLen = 0
 				if len(act.expect) == 0 { // 不匹配直接发送
 					isMatch = true
 					matchStr = ""
+					cutLen = len(text)
 				} else if act.isReg {
 					matchStr = sf.regMatch(text, act.expect)
 					if matchStr != "" {
 						isMatch = true
 					}
 				} else {
-					isMatch = strings.Contains(text, act.expect)
+					idx := strings.LastIndex(text, act.expect)
+					if idx > -1 {
+						isMatch = true
+						cutLen = idx + len(act.expect)
+					}
+				}
+
+				//抛弃已匹配字符串前面的字符串，避免重复匹配
+				if cutLen > 0 {
+					copy(sf.buf, sf.buf[cutLen:])
+					sf.start = sf.start + n - cutLen
 				}
 
 				// 匹配成功，
@@ -172,17 +183,21 @@ func (sf *XExpect) Expect(rule [][]string) (int, string) {
 					}
 				}
 			}
-		} else {
-			sf.start += n
+		}
+
+		//
+		if sf.start+n > sf.matchLen {
+			copy(sf.buf, sf.buf[sf.matchLen:])
+			sf.start = sf.start + n - sf.matchLen
 		}
 	}
 
 	return -1, ""
 }
 
-func (sf *XExpect) Interact() {
+func (sf *XExpect) Term() {
 	if sf.step < stepRun {
-		sf.errorf("Expect() must be called after RunCmd()")
+		sf.errorf("Matchs() must be called after Run()")
 	}
 	if sf.step == stepInteract {
 		sf.errorf("Interact() does not allow repeated calls")
@@ -201,9 +216,6 @@ func (sf *XExpect) Interact() {
 }
 
 func (sf *XExpect) Exit() {
-	if sf.step < stepRun {
-		sf.errorf("Expect() must be called after RunCmd()")
-	}
 	if sf.step == stepExit {
 		sf.errorf("Exit() does not allow repeated calls")
 	}
@@ -236,7 +248,7 @@ func (sf *XExpect) parseRule(rule [][]string) []*action {
 	numC := 0
 	for _, v := range rule {
 		if len(v) < 2 {
-			sf.errorf("rule error: The actions must contain at least two elements: expect and send")
+			sf.errorf("rule error: The actions must contain at least two elements: match and send")
 		}
 		act := &action{
 			expect:     v[0],
@@ -245,13 +257,14 @@ func (sf *XExpect) parseRule(rule [][]string) []*action {
 			isReg:      false,
 		}
 		for i := range v[2:] {
-			if v[i] == "C" {
+			switch v[2+i] {
+			case "C":
 				act.isContinue = true
 				numC++
-			} else if v[i] == "E" {
+			case "E":
 				act.isReg = true
-			} else {
-				sf.errorf("rule error: only 'C' and 'E' flags are allowed for action")
+			default:
+				sf.errorf("rule error: flag = '%s', want 'C' or 'E'", v[2+i])
 			}
 		}
 		out = append(out, act)
@@ -275,106 +288,7 @@ func (sf *XExpect) onSizeChange(p *pty.Pty) func(uint16, uint16) {
 }
 
 func (sf *XExpect) errorf(format string, vals ...any) {
-	fmt.Fprintf(os.Stderr, format, vals...)
+	fmt.Fprintf(os.Stderr, format+"\n", vals...)
+	sf.close()
 	os.Exit(1)
-}
-
-type SendInfo struct {
-	Keyword string // 等待出现的字符串
-	Send    string // 发送的字符串
-}
-
-func RunCmd(args []string, timeout int, sends []*SendInfo) {
-	// open a pty with options
-	opt := &pty.Options{
-		Path: args[0],
-		Args: args,
-		Dir:  "",
-		Env:  nil,
-		Size: &pty.WinSize{
-			Cols: 120,
-			Rows: 30,
-		},
-		Type: "",
-	}
-	p, err := pty.OpenWithOptions(opt)
-	if err != nil {
-		log.Panic("Failed to create pty:", err)
-		return
-	}
-	defer p.Close()
-
-	// enable terminal
-	t, err := term.Open(os.Stdin, os.Stdout, onSizeChange(p))
-	if err != nil {
-		doSends(timeout, p, sends)
-		go func() {
-			io.Copy(p, os.Stdin)
-		}()
-		io.Copy(os.Stdout, p)
-		return
-	}
-	defer t.Close()
-
-	doSends(timeout, p, sends)
-	// start data exchange between terminal and pty
-	go func() {
-		io.Copy(p, t)
-	}()
-	io.Copy(t, p)
-}
-
-// When the terminal window size changes, synchronize the size of the pty
-func onSizeChange(p *pty.Pty) func(uint16, uint16) {
-	return func(cols, rows uint16) {
-		size := &pty.WinSize{
-			Cols: cols,
-			Rows: rows,
-		}
-		p.SetSize(size)
-	}
-}
-
-func doSends(timeout int, rw io.ReadWriter, sends []*SendInfo) {
-	tch := time.After(time.Second * time.Duration(timeout))
-	buf := make([]byte, 1024)
-	start := 0
-
-	for _, v := range sends {
-		start = sendOne(rw, tch, v.Keyword, v.Send, buf, start)
-	}
-}
-
-func sendOne(rw io.ReadWriter, tch <-chan time.Time, keyword, send string, buf []byte, start int) int {
-	// 检查并尝试输入密码
-	kLen := len(keyword)
-	for {
-		n, err := rw.Read(buf[start:])
-		if err != nil {
-			break
-		}
-		fmt.Print(string(buf[start : start+n]))
-		if start+n > kLen {
-			if strings.Contains(string(buf[:n+start]), keyword) {
-				_, err := rw.Write([]byte(send + "\n"))
-				if err != nil {
-					fmt.Println("send error:", err)
-				}
-				break
-			}
-			copy(buf, buf[n+start-kLen:])
-			start = kLen
-		} else {
-			start += n
-		}
-
-		select {
-		case <-tch:
-			fmt.Fprintln(os.Stderr, "timeout")
-			os.Exit(1)
-		default:
-		}
-	}
-
-	return start
 }

@@ -1,141 +1,98 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"io"
 	"os"
-	"strconv"
-	"strings"
+	"path/filepath"
 
-	"github.com/zh-five/xexpect/xexpect"
+	"github.com/zh-five/xtool/crypto/xaes"
 )
 
 const (
-	flagE   string = "-e"
-	flagS   string = "-s"
-	flagT   string = "-t"
-	flagArg string = "args"
+	EXT_js   = ".js"
+	EXT_xexp = ".xexpect"
 )
 
-var allAllow = map[string]string{
-	flagE:   "expect",
-	flagS:   "send",
-	flagT:   "timeout/s",
-	flagArg: "",
-}
+var KEY = []byte{0x84, 0xe7, 0xe0, 0x2e, 0xbc, 0x6b, 0xc1, 0xca, 0x64, 0x16, 0x55, 0xf7, 0x91, 0x1b, 0x23, 0xf3, 0x2f, 0xf8, 0x45, 0x9b, 0x2, 0xd2, 0xed, 0xb3, 0x8f, 0xc3, 0x36, 0x37, 0x83, 0xe8, 0x88, 0xfe}
 
 func main() {
-	args, timeout, sends := flagParse()
+	jsPath := flag.String("f", "", "file, 运行xexpect js文件")
+	jsCode := flag.String("c", "", "code, 运行xexpect js代码")
+	enPath := flag.String("e", "", "encrypt, 加密xexpect js文件")
+	flag.Parse()
 
-	xexpect.RunCmd(args, timeout, sends)
+	code := []byte{}
+	if *jsPath != "" {
+		code = readFileCode(*jsPath)
+	} else if *jsCode != "" {
+		code = []byte(*jsCode)
+	} else if *enPath != "" {
+		encryptFile(*enPath)
+		return
+	} else {
+		code = readFromStdin()
+	}
 
-	// fmt.Println("args:", args)
-	// fmt.Println("timeout:", timeout)
-	// fmt.Printf("sends:%d\n", len(sends))
-	// for i, v := range sends {
-	// 	fmt.Printf("\t%d: %+v\n", i, v)
-	// }
+	js := NewJS()
+	js.Run(string(code))
 }
 
-func flagParse() ([]string, int, []*xexpect.SendInfo) {
-	args := []string{}
-	timeout := -1
-	sends := []*xexpect.SendInfo{}
-
-	allow := mkAllow([]string{flagE, flagT, flagArg})
-	osArgs := os.Args[1:]
-	aLen := len(osArgs)
-	for i := 0; i < aLen; i++ {
-		v := osArgs[i]
-
-		switch v {
-		case flagE:
-			if _, ok := allow[flagE]; !ok {
-				showErrorf("Error: don't expect -e (expect), expect: %s\n", getAllowDesc(allow))
-			}
-			sends = append(sends, &xexpect.SendInfo{
-				Keyword: osArgs[i+1],
-				Send:    "",
-			})
-			allow = mkAllow([]string{flagS})
-			i++
-		case flagS:
-			if _, ok := allow[flagS]; !ok {
-				showErrorf("Error: don't expect -s (send), expect: %s\n", getAllowDesc(allow))
-			}
-			sends[len(sends)-1].Send = osArgs[i+1]
-			i++
-			allow = mkAllow([]string{flagE, flagT, flagArg})
-		case flagT:
-			if _, ok := allow[flagT]; !ok {
-				showErrorf("Error: don't expect -t (timeout/s), expect: %s\n", getAllowDesc(allow))
-			}
-			tmp := osArgs[i+1]
-			i++
-			allow = mkAllow([]string{flagE, flagArg})
-			t, err := strconv.Atoi(tmp)
-			if err != nil || t < 1 {
-				showErrorf("Error: -t (timeout/s) value must be a positive integer")
-			}
-			timeout = t
-		default:
-			if _, ok := allow[flagArg]; !ok {
-				showErrorf("Error: don't expect args, expect %s\n", getAllowDesc(allow))
-			}
-			args = osArgs[i:]
-			goto END
+func readFileCode(jsPath string) (b []byte) {
+	switch getExt(jsPath) {
+	case EXT_js:
+		b = readFromFile(jsPath)
+	case EXT_xexp:
+		b = readFromFile(jsPath)
+		tmp, err := xaes.NewAES().Decrypt(KEY, b)
+		if err != nil {
+			errorf("Decrypt error: %v", err)
 		}
+		b = tmp
+	default:
+		errorf("xexpect js file ext error: want %s or %s", EXT_js, EXT_xexp)
 	}
-END:
-	if timeout < 1 {
-		timeout = 30
-	}
-
-	return args, timeout, sends
+	return b
 }
 
-func showErrorf(format string, val ...any) {
-	fmt.Fprintf(os.Stderr, format, val...)
-	fmt.Println()
-	usage()
+func readFromFile(jsPath string) []byte {
+	b, err := os.ReadFile(jsPath)
+	if err != nil {
+		errorf("read js file error: %v", err)
+	}
+
+	return b
+}
+
+func encryptFile(jsPath string) {
+	b, err := xaes.NewAES().Encrypt(KEY, readFromFile(jsPath))
+	if err != nil {
+		errorf("encrypt error: %v", err)
+	}
+
+	toFile := jsPath + EXT_xexp
+	err = os.WriteFile(toFile, b, 0o644)
+	if err != nil {
+		errorf("encrypt WriteFile error: %v", err)
+	}
+	fmt.Println("encrypt to file:", toFile)
+}
+
+func getExt(jsPath string) string {
+	return filepath.Ext(jsPath)
+}
+
+func readFromStdin() []byte {
+	b, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		errorf("read stdin error: %v", err)
+	}
+
+	return b
+}
+
+func errorf(format string, vals ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", vals...)
 	os.Exit(1)
-}
-
-func getAllowDesc(allow map[string]string) string {
-	list := make([]string, 0, len(allow))
-	for k, v := range allow {
-		tmp := k
-		if v != "" {
-			tmp += " (" + v + ") "
-		}
-		list = append(list, tmp)
-	}
-
-	//fmt.Println("keys:", keys)
-
-	return strings.Join(list, ",")
-}
-
-func mkAllow(flags []string) map[string]string {
-	allow := map[string]string{}
-	for _, v := range flags {
-		allow[v] = allAllow[v]
-	}
-
-	return allow
-}
-
-func usage() {
-	fmt.Println(`usage:
-xexpect [-t timeout/s] [[-e expect -s send] -e expect -s send ...] args
-xexpect -h 
-    -t: timeout/s default 30s
-    -e: expect string, can be an empty string
-    -s: send string, must follow the -e
-    args: command argument
-example: 
-xexpect ssh -p 22 root@host
-xexpect -t 3 -e 'password: ' -s 123456 ssh -p 22 root@host
-xexpect -e 'password: ' -s "123456" ssh -p 22 root@host
-xexpect -e 'password: ' -s "123456" -e "#" -s "cd /data/git/" ssh -p 22 root@host
-    `)
 }
